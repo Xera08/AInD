@@ -1,0 +1,38 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Campaign {
+  id          String     @id @default(cuid())
+  title       String
+  setting     String
+  tone        String
+  level       Int        @default(1)
+  createdAt   DateTime   @default(now())
+  characters  Character[]
+  turns       Turn[]
+}
+
+model Character {
+  id          String   @id @default(cuid())
+  name        String
+  className   String
+  ancestry    String
+  level       Int      @default(1)
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+}
+
+model Turn {
+  id          String   @id @default(cuid())
+  role        String
+  content     String
+  createdAt   DateTime @default(now())
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+}
