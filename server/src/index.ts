@@ -17,7 +17,17 @@ const baseUrl = process.env.AI_BASE_URL ?? process.env.OPENAI_BASE_URL ?? 'https
 app.use(cors());
 app.use(express.json());
 
-const systemPrompt = `You are the Dungeon Master for a focused Dungeons & Dragons-inspired solo adventure. Stay in character as a vivid, concise narrator. Resolve the player's action fairly using reasonable tabletop rules: call for a check when uncertainty matters, invent a DC, and report the outcome. Never decide the player's actions for them. Keep responses to 2-4 paragraphs and end with a clear situation or question. The setting is Blackwater Fen, a rain-soaked gothic marsh. Do not claim to have access to tools or memories outside this conversation. Do not give clear action variants to players unless they directly ask for it. Describe the scene only from the character's point of view; do not reveal things they cannot see. Do not tell the possible outcomes of a roll or reveal the DC.`;
+const systemPrompt = `You are the Dungeon Master for a focused Dungeons & Dragons-inspired solo adventure. Stay in character as a vivid, concise narrator. Resolve the player's action fairly using reasonable tabletop rules: call for a check when uncertainty matters, invent a DC, and report the outcome. Never decide the player's actions for them. Keep responses to 2-3 short paragraphs, under 220 words, always finish the final sentence, and end with a clear situation or question. The setting is Blackwater Fen, a rain-soaked gothic marsh. Do not claim to have access to tools, functions, or memories outside this conversation. Do not give clear action variants to players unless they directly ask for it. Describe the scene only from the character's point of view; do not reveal things they cannot see. Do not tell the possible outcomes of a roll or reveal the DC. This is a text-only DM: never call tools, functions, or external actions. Dice results supplied by the player are already resolved facts; narrate their consequences directly.`;
+
+function emptyResponseFallback(action: string): string {
+  if (/\b(roll|rolled|attack roll|check|saving throw|save)\b/i.test(action)) {
+    return 'The DM acknowledges the resolved roll and considers its consequence in the scene. Describe what you are aiming at or what you are trying to accomplish next.';
+  }
+  if (/\b(use|draw|equip|consume|throw|give|have|possess)\b/i.test(action)) {
+    return 'The action cannot be completed with the current character sheet. The named item or ability is not available. What do you do with the equipment you actually carry?';
+  }
+  return 'The DM pauses to read the scene. Your action is possible to investigate, observe, or attempt; describe what you do next.';
+}
 
 app.get('/api/health', (_request, response) => {
   response.json({ status: 'ok', service: 'aind-dm-engine' });
@@ -84,9 +94,13 @@ app.post('/api/chat', async (request, response) => {
   }
 
   try {
-    const latestPlayerAction = [...messages].reverse().find((message) => message.role === 'user')?.content ?? '';
+    const normalizedMessages = messages.slice(-12).map((message) => ({
+      ...message,
+      content: message.content.replace(/\[Rolled\s+(d\d+(?:[+-]\d+)?):\s*(-?\d+)\]/gi, 'Resolved dice result: $1 = $2. Treat this roll as final and narrate its consequence.'),
+    }));
+    const latestPlayerAction = [...normalizedMessages].reverse().find((message) => message.role === 'user')?.content ?? '';
     const rulesContext = retrieveRules(latestPlayerAction);
-    const inventoryContext = `The character inventory is exactly: ${character.inventory.join(', ')}. If the action requires an item not listed, do not let it appear from nowhere. Say that the character does not have it and ask what they do with the equipment they actually carry.`;
+    const inventoryContext = `Inventory check: only reject an action for inventory when the player explicitly uses, draws, equips, consumes, throws, gives, or claims to already possess a named item. Searching, investigating, looking around, and asking what is in the scene are valid actions that may reveal new objects. Current inventory: ${character.inventory.join(', ')}.`;
     const modelResponse = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -94,10 +108,11 @@ app.post('/api/chat', async (request, response) => {
       body: JSON.stringify({
         model,
         temperature: 0.9,
-        max_tokens: 350,
+        max_tokens: 900,
+        tool_choice: 'none',
         messages: [
           { role: 'system', content: `${systemPrompt}\n${characterRules(character)}\n${inventoryContext}\n\n${rulesSource}\nUse the following retrieved rules context when relevant. Treat it as the rules authority for this response. Do not mention the internal index unless the player asks about rules. If the context does not cover something, make a transparent, reasonable ruling rather than presenting an invented rule as exact:\n${rulesContext}` },
-          ...messages.slice(-12),
+          ...normalizedMessages,
         ],
       }),
     });
@@ -107,7 +122,7 @@ app.post('/api/chat', async (request, response) => {
       return;
     }
     const message = data.choices?.[0]?.message?.content?.trim();
-    response.json({ message: message || 'The DM pauses. Your action needs an item or ability that is not available to this character. What do you do with the equipment you actually carry?' });
+    response.json({ message: message || emptyResponseFallback(latestPlayerAction) });
   } catch (error) {
     console.error(error);
     response.status(502).json({ error: 'The DM is unreachable right now.' });
